@@ -127,7 +127,7 @@ unilife-manager/
 
 
 
-## For all advanced notification and automation features. Let me build this systematically.
+## For all advanced notification and automation features.
 ```
 unilife-manager/
 ├── client/
