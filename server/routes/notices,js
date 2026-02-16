@@ -1,0 +1,357 @@
+const router = require('express').Router();
+const Notice = require('../models/Notice');
+const Group = require('../models/Group');
+const Notification = require('../models/Notification');
+const auth = require('../middleware/auth');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = 'uploads/notices/';
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|pdf|doc|docx|txt/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (extname && mimetype) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only image, PDF and document files are allowed'));
+    }
+  }
+});
+
+// Get all notices for a group
+router.get('/group/:groupId', auth, async (req, res) => {
+  try {
+    const groupId = req.params.groupId;
+    
+    // Check if user is member of the group
+    const group = await Group.findOne({
+      _id: groupId,
+      'members.user': req.user.id
+    });
+
+    if (!group) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. You are not a member of this group.'
+      });
+    }
+
+    const notices = await Notice.find({ group: groupId })
+      .populate('postedBy', 'name email')
+      .sort({ pinned: -1, createdAt: -1 });
+
+    // Mark as viewed
+    await Promise.all(notices.map(async (notice) => {
+      const alreadyViewed = notice.views.some(view => 
+        view.user.toString() === req.user.id
+      );
+      
+      if (!alreadyViewed) {
+        notice.views.push({
+          user: req.user.id,
+          viewedAt: new Date()
+        });
+        await notice.save();
+      }
+    }));
+
+    res.json({
+      success: true,
+      notices
+    });
+  } catch (error) {
+    console.error('Get notices error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Create new notice (admin/teacher/CR only)
+router.post('/', auth, upload.array('attachments', 5), async (req, res) => {
+  try {
+    const { groupId, title, content, type, priority, tags, expiresAt } = req.body;
+    
+    // Check if user has permission to post
+    const group = await Group.findOne({
+      _id: groupId,
+      'members.user': req.user.id
+    });
+
+    if (!group) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    const userRole = group.members.find(m => 
+      m.user.toString() === req.user.id
+    )?.role;
+
+    if (!['admin', 'teacher', 'cr'].includes(userRole)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins, teachers, and CRs can post notices'
+      });
+    }
+
+    // Process uploaded files
+    const attachments = req.files?.map(file => ({
+      filename: file.originalname,
+      url: `/uploads/notices/${file.filename}`,
+      fileType: file.mimetype,
+      size: file.size
+    })) || [];
+
+    const notice = new Notice({
+      group: groupId,
+      postedBy: req.user.id,
+      title,
+      content,
+      type: type || 'message',
+      attachments,
+      priority: priority || 'normal',
+      tags: tags ? tags.split(',') : [],
+      expiresAt: expiresAt ? new Date(expensesAt) : null
+    });
+
+    await notice.save();
+
+    // Send notifications to all group members
+    await sendNoticeNotification(groupId, notice, req.user.id);
+
+    res.status(201).json({
+      success: true,
+      message: 'Notice posted successfully',
+      notice: await notice.populate('postedBy', 'name email')
+    });
+  } catch (error) {
+    console.error('Create notice error:', error);
+    
+    // Clean up uploaded files if error occurred
+    if (req.files) {
+      req.files.forEach(file => {
+        fs.unlink(file.path, () => {});
+      });
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Update notice
+router.put('/:id', auth, upload.array('attachments', 5), async (req, res) => {
+  try {
+    const notice = await Notice.findById(req.params.id)
+      .populate('group');
+    
+    if (!notice) {
+      return res.status(404).json({
+        success: false,
+        message: 'Notice not found'
+      });
+    }
+
+    // Check permission
+    const group = notice.group;
+    const userRole = group.members.find(m => 
+      m.user.toString() === req.user.id
+    )?.role;
+
+    if (!['admin', 'teacher', 'cr'].includes(userRole) || 
+        notice.postedBy.toString() !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'You do not have permission to edit this notice'
+      });
+    }
+
+    // Update fields
+    const updatableFields = ['title', 'content', 'type', 'priority', 'tags', 'pinned', 'expiresAt'];
+    updatableFields.forEach(field => {
+      if (req.body[field] !== undefined) {
+        notice[field] = req.body[field];
+      }
+    });
+
+    // Handle file attachments
+    if (req.files && req.files.length > 0) {
+      const newAttachments = req.files.map(file => ({
+        filename: file.originalname,
+        url: `/uploads/notices/${file.filename}`,
+        fileType: file.mimetype,
+        size: file.size
+      }));
+      
+      notice.attachments = [...notice.attachments, ...newAttachments];
+    }
+
+    notice.updatedAt = new Date();
+    await notice.save();
+
+    res.json({
+      success: true,
+      message: 'Notice updated successfully',
+      notice: await notice.populate('postedBy', 'name email')
+    });
+  } catch (error) {
+    console.error('Update notice error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Delete notice
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const notice = await Notice.findById(req.params.id)
+      .populate('group');
+    
+    if (!notice) {
+      return res.status(404).json({
+        success: false,
+        message: 'Notice not found'
+      });
+    }
+
+    // Check permission
+    const group = notice.group;
+    const userRole = group.members.find(m => 
+      m.user.toString() === req.user.id
+    )?.role;
+
+    if (!['admin', 'teacher', 'cr'].includes(userRole)) {
+      return res.status(403).json({
+        success: false,
+        message: 'You do not have permission to delete this notice'
+      });
+    }
+
+    // Delete attached files
+    notice.attachments.forEach(attachment => {
+      const filePath = path.join(__dirname, '..', attachment.url);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    });
+
+    await notice.deleteOne();
+
+    res.json({
+      success: true,
+      message: 'Notice deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete notice error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Pin/Unpin notice
+router.patch('/:id/pin', auth, async (req, res) => {
+  try {
+    const { pinned } = req.body;
+    
+    const notice = await Notice.findById(req.params.id)
+      .populate('group');
+    
+    if (!notice) {
+      return res.status(404).json({
+        success: false,
+        message: 'Notice not found'
+      });
+    }
+
+    // Check permission
+    const group = notice.group;
+    const userRole = group.members.find(m => 
+      m.user.toString() === req.user.id
+    )?.role;
+
+    if (!['admin', 'teacher', 'cr'].includes(userRole)) {
+      return res.status(403).json({
+        success: false,
+        message: 'You do not have permission to pin/unpin notices'
+      });
+    }
+
+    notice.pinned = pinned;
+    notice.updatedAt = new Date();
+    await notice.save();
+
+    res.json({
+      success: true,
+      message: `Notice ${pinned ? 'pinned' : 'unpinned'} successfully`,
+      notice
+    });
+  } catch (error) {
+    console.error('Pin notice error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Helper function to send notice notifications
+async function sendNoticeNotification(groupId, notice, excludedUserId) {
+  try {
+    const group = await Group.findById(groupId).populate('members.user');
+    
+    const notifications = group.members
+      .filter(member => member.user._id.toString() !== excludedUserId)
+      .map(member => {
+        return new Notification({
+          user: member.user._id,
+          title: '📢 New Group Notice',
+          message: `${notice.title}\n${notice.content.substring(0, 100)}...`,
+          type: 'group_notice',
+          data: {
+            noticeId: notice._id,
+            groupId,
+            postedBy: notice.postedBy
+          },
+          priority: notice.priority === 'urgent' ? 'urgent' : 'high'
+        }).save();
+      });
+
+    await Promise.all(notifications);
+    
+    // TODO: Send real-time WebSocket notifications
+    
+  } catch (error) {
+    console.error('Error sending notice notifications:', error);
+  }
+}
+
+module.exports = router;
