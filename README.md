@@ -3,7 +3,7 @@ This Repo is creating for my Academic Project as WebApps by MERN with covering f
 
 
 ## For Authenticating and made interactive group management system with user roles and email verification
-
+```
 unilife-manager/
 ├── client/
 │   ├── public/
@@ -40,7 +40,7 @@ unilife-manager/
 │   │   └── auth.js
 │   ├── utils/
 │   │   └── emailService.js
-
+```
 
 
 
@@ -48,7 +48,7 @@ unilife-manager/
 
 
 ## For a comprehensive system with Courses, Routine, Cost, Notes, Dashboard, and Statistics pages
-
+```
 unilife-manager/
 ├── client/
 │   ├── src/
@@ -119,7 +119,7 @@ unilife-manager/
 │   │   └── dashboard.js
 │   └── server.js
 
-
+```
 
 
 
@@ -128,7 +128,7 @@ unilife-manager/
 
 
 ## For all advanced notification and automation features. Let me build this systematically.
-
+```
 unilife-manager/
 ├── client/
 │   ├── src/
@@ -171,6 +171,6 @@ unilife-manager/
     └── logo192.png (app logo for notifications)
 │   └── server.js
 └── package.json
-
+```
 
 
